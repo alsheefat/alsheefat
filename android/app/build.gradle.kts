@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,9 +16,12 @@ if (file("google-services.json").exists()) {
 //   2. -PAPI_BASE_URL=...  or  API_BASE_URL in gradle.properties
 //   3. API_BASE_URL environment variable
 // The address must end with /api/v1/
-val apiProps = java.util.Properties().apply {
-    val f = rootProject.file("api.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
+val apiProps = Properties()
+val apiPropsFile = rootProject.file("api.properties")
+if (apiPropsFile.exists()) {
+    apiPropsFile.inputStream().use { input ->
+        apiProps.load(input)
+    }
 }
 val apiBaseUrl: String = apiProps.getProperty("API_BASE_URL")
     ?: (project.findProperty("API_BASE_URL") as String?)
