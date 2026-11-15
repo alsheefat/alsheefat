@@ -1,0 +1,97 @@
+name: Build APK
+
+# Runs on every push to main (that is what the Termux "ship.sh" does) or by hand from the Actions tab.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # lets the job publish the APK as a GitHub release
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version (from the VERSION file written by ship.sh)
+        id: ver
+        run: |
+          N=$(tr -dc '0-9' < VERSION 2>/dev/null || true)
+          N=${N:-$GITHUB_RUN_NUMBER}
+          echo "n=$N" >> "$GITHUB_OUTPUT"
+          echo "Building version $N"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Add Firebase config (google-services.json)
+        working-directory: android
+        env:
+          GSJ: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GSJ" ]; then
+            echo "$GSJ" | base64 -d > app/google-services.json
+            echo "Firebase config added - Google sign-in included."
+          else
+            echo "::warning::Secret GOOGLE_SERVICES_JSON is not set - building WITHOUT Google sign-in."
+          fi
+
+      - name: Configure release signing
+        env:
+          KEYSTORE_B64: ${{ secrets.AUSSNSC_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "AUSSNSC_KEYSTORE_BASE64 secret is missing"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 --decode > android/app/aussnsc-release.jks
+
+      - name: Build APK
+        working-directory: android
+        env:
+          AUSSNSC_KEYSTORE_PASSWORD: ${{ secrets.AUSSNSC_KEYSTORE_PASSWORD }}
+        run: >
+          gradle assembleRelease --no-daemon --stacktrace
+          -PVERSION_CODE=${{ steps.ver.outputs.n }}
+          -PVERSION_NAME=v${{ steps.ver.outputs.n }}
+
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk "AUSSNSC-v${{ steps.ver.outputs.n }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSSNSC-v${{ steps.ver.outputs.n }}
+          path: AUSSNSC-v${{ steps.ver.outputs.n }}.apk
+
+      - name: Publish releases (v<N> and apk-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N=${{ steps.ver.outputs.n }}
+          APK="AUSSNSC-v${N}.apk"
+          NOTES="AUSSNSC app version ${N} - commit ${GITHUB_SHA::7}"
+          gh release delete "v${N}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v${N}" "$APK" --target "$GITHUB_SHA" --title "AUSSNSC v${N}" --notes "$NOTES" --latest
+          gh release delete apk-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create apk-latest "$APK" --target "$GITHUB_SHA" --title "AUSSNSC (latest build)" --notes "$NOTES" --latest=false
+          # keep only the 8 newest numbered releases
+          gh release list --limit 100 --json tagName -q '.[].tagName' | grep -E '^v[0-9]+$' | sort -t v -k2 -n -r | tail -n +9 | while read -r t; do
+            gh release delete "$t" --yes --cleanup-tag || true
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### AUSSNSC v${{ steps.ver.outputs.n }} built"
+            echo "Download: **Releases -> v${{ steps.ver.outputs.n }}** (file \`AUSSNSC-v${{ steps.ver.outputs.n }}.apk\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
